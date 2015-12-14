@@ -1,0 +1,82 @@
+#!/bin/bash
+
+set -e
+
+# Put your dUDE's hostname here
+DUDE=dude
+
+# To speed up deploys considering adding the following to your ~/.ssh/config,
+#
+# Host my-dude.com
+#   ControlMaster auto
+#   ControlPath ~/.ssh/master-%r@%n:%p
+#   ControlPersist 60
+
+EXEC_DUDE="ssh -q $DUDE"
+
+if ! git rev-parse --is-inside-work-tree &> /dev/null; then
+    echo 'Not inside a Git repository' >&2
+    exit 1
+fi
+
+# Local path
+PROJ=$(git rev-parse --show-toplevel)
+
+ORIGIN_URL=$(git remote -v | awk '$1 == "origin" {print $2; exit}')
+ORIGIN_URL=${ORIGIN_URL%/}
+ORIGIN_NAME=${ORIGIN_URL##*/}
+ORIGIN_NAME=${ORIGIN_NAME%.git}
+
+# Remote path
+RPROJ_BASE="/usr/local/bronto/repos"
+RPROJ="${RPROJ_BASE}/${ORIGIN_NAME}"
+
+# Deploy branch
+BRANCH=deploy-dude
+
+RGIT="$EXEC_DUDE git --git-dir=$RPROJ/.git --work-tree=$RPROJ"
+
+if ! $EXEC_DUDE true; then
+	echo "Can not reach dude. Is it running?" >&2
+	exit 1
+fi
+
+if ! $EXEC_DUDE test -d $RPROJ; then
+    echo "Performing initial clone from $ORIGIN_URL"
+    $EXEC_DUDE -t git clone $ORIGIN_URL $RPROJ
+fi
+
+cd $PROJ
+
+git remote remove dude 2> /dev/null || true
+git remote add dude dude:$RPROJ
+
+# Have to make sure we aren't on the deploy branch before we delete it
+$RGIT checkout -q master
+
+DIRTY=
+CURRENT_BRANCH=$(git branch | grep '^\*' | cut -d' ' -f 2)
+
+if git status -s | grep '^.' > /dev/null; then
+    DIRTY=1
+    git add -A
+    git commit -q -a -n -m "dUDE deployment checkpoint on $CURRENT_BRANCH"
+fi
+
+git push -qf dude $CURRENT_BRANCH:$BRANCH
+git remote remove dude
+
+if [ -n "$DIRTY" ]; then
+    git reset -q HEAD^
+fi
+
+$RGIT checkout -q $BRANCH
+echo "Remote repository updated."
+
+if SERVICE_NAME=`$EXEC_DUDE dudeman find-service $ORIGIN_NAME` && $EXEC_DUDE dudeman supports-command $SERVICE_NAME deploy; then
+    read -p "Run 'dudeman deploy $SERVICE_NAME'? [y/N] " _P
+
+    if [ "$_P" = "y" ]; then
+        $EXEC_DUDE -t dudeman deploy $SERVICE_NAME
+    fi
+fi
